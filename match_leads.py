@@ -19,6 +19,7 @@ Optional column overrides (only if auto-detection picks the wrong column):
 
 import os
 import re
+import io
 import csv
 import sys
 import glob
@@ -135,11 +136,26 @@ def resolve_leads_file():
 def load_table(path):
     """Return (headers, rows) for a .csv or .xlsx file. Cells are strings/numbers/dates."""
     ext = os.path.splitext(path)[1].lower()
-    if ext == ".csv":
-        with open(path, newline="", encoding="utf-8-sig", errors="replace") as f:
-            all_rows = list(csv.reader(f))
+    if ext in (".csv", ".tsv", ".txt"):
+        raw = open(path, "rb").read()
+        if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):        # UTF-16 (Facebook's usual export)
+            text = raw.decode("utf-16", errors="replace")
+        elif raw[:3] == b"\xef\xbb\xbf":                 # UTF-8 with BOM
+            text = raw.decode("utf-8-sig", errors="replace")
+        else:
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw.decode("latin-1", errors="replace")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        first = next((ln for ln in text.split("\n") if ln.strip()), "")
+        counts = {d: first.count(d) for d in ["\t", ",", ";", "|"]}
+        delim = max(counts, key=counts.get)
+        if counts[delim] == 0:
+            delim = ","
+        all_rows = list(csv.reader(io.StringIO(text), delimiter=delim))
         if not all_rows:
-            die("The CSV file appears to be empty.")
+            die("The file appears to be empty.")
         return [str(h).strip() for h in all_rows[0]], all_rows[1:]
     elif ext in (".xlsx", ".xlsm"):
         wb = load_workbook(path, read_only=True, data_only=True)
