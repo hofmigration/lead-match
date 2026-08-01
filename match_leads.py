@@ -344,81 +344,94 @@ def main():
     hs_emails, hs_phones, hs_total = fetch_contacts_in_range(start_ms, end_ms)
     log(f"HubSpot has {hs_total} contacts created in this range.")
 
-    matched, unmatched, skipped = [], [], []
+    # ---- categorise: created-in-range match / older match / truly missing ----
+    matched_in, prelim_unmatched, skipped = [], [], []
     for ld in leads:
         if not ld["email"] and not ld["phone"]:
             skipped.append(ld)
             continue
         if (ld["email"] and ld["email"] in hs_emails) or (ld["phone"] and ld["phone"] in hs_phones):
-            matched.append(ld)
+            matched_in.append(ld)
         else:
-            unmatched.append(ld)
+            prelim_unmatched.append(ld)
 
-    # second pass: for still-unmatched leads with an email, check all of HubSpot
-    recheck = [ld["email"] for ld in unmatched if ld["email"]]
+    found_anywhere = set()
+    recheck = [ld["email"] for ld in prelim_unmatched if ld["email"]]
     if recheck:
-        log(f"Double-checking {len(recheck)} unmatched emails against all of HubSpot...")
+        log(f"{len(prelim_unmatched)} leads have no HubSpot contact created in this range. "
+            f"Checking whether they exist in HubSpot from another time...")
         found_anywhere = emails_exist_anywhere(recheck)
-        still = []
-        for ld in unmatched:
-            if ld["email"] and ld["email"] in found_anywhere:
-                matched.append(ld)          # exists, just created outside the window
-            else:
-                still.append(ld)
-        unmatched = still
 
-    # ---- write the unmatched Excel ----
+    matched_outside, missing = [], []
+    for ld in prelim_unmatched:
+        if ld["email"] and ld["email"] in found_anywhere:
+            matched_outside.append(ld)      # exists in HubSpot, just created outside the window
+        else:
+            missing.append(ld)              # not found in HubSpot at all
+
+    checked = len(matched_in) + len(matched_outside) + len(missing)
+
+    # ---- write the results workbook (one sheet per bucket) ----
+    def add_sheet(wb, title, rows_, first=False):
+        ws = wb.active if first else wb.create_sheet(title)
+        if first:
+            ws.title = title
+        ws.append(["Name", "Email", "Phone", "Facebook date"])
+        for ld in rows_:
+            ws.append([ld["name"], ld["email_raw"], ld["phone_raw"],
+                       ld["date"].isoformat() if ld["date"] else ""])
+
     wb = Workbook()
-    ws = wb.active
-    ws.title = "Unmatched"
-    ws.append(["Name", "Email", "Phone", "Facebook date", "Why missing"])
-    for ld in unmatched:
-        reason = "no email/phone match in HubSpot"
-        ws.append([ld["name"], ld["email_raw"], ld["phone_raw"],
-                   ld["date"].isoformat() if ld["date"] else "", reason])
+    add_sheet(wb, "Missing from HubSpot", missing, first=True)
+    add_sheet(wb, "In HubSpot but older", matched_outside)
     if skipped:
-        ws2 = wb.create_sheet("Skipped (no email or phone)")
-        ws2.append(["Name", "Email", "Phone", "Facebook date"])
-        for ld in skipped:
-            ws2.append([ld["name"], ld["email_raw"], ld["phone_raw"],
-                        ld["date"].isoformat() if ld["date"] else ""])
+        add_sheet(wb, "Skipped (no email or phone)", skipped)
     wb.save(OUT_FILE)
 
-    checked = len(matched) + len(unmatched)
     # ---- console + step summary ----
-    log("=" * 44)
-    log(f"Checked:   {checked}")
-    log(f"Matched:   {len(matched)}")
-    log(f"Unmatched: {len(unmatched)}   <-- missing from HubSpot")
+    log("=" * 52)
+    log(f"Facebook leads checked:            {checked}")
+    log(f"In HubSpot (created this range):   {len(matched_in)}")
+    log(f"In HubSpot (created another time): {len(matched_outside)}")
+    log(f"MISSING from HubSpot entirely:     {len(missing)}")
     if skipped:
-        log(f"Skipped:   {len(skipped)} (row had no email or phone)")
-    log("=" * 44)
+        log(f"Skipped (no email/phone):          {len(skipped)}")
+    log("=" * 52)
 
     lines = [
-        "## Facebook ↔ HubSpot lead match",
+        "## Facebook to HubSpot lead match",
         "",
         f"**Range:** {start} to {end}",
         "",
         "| | Count |",
         "|---|---:|",
         f"| Facebook leads checked | {checked} |",
-        f"| ✅ Matched (in HubSpot) | {len(matched)} |",
-        f"| ❌ Unmatched (missing from HubSpot) | **{len(unmatched)}** |",
+        f"| In HubSpot, created in this range | {len(matched_in)} |",
+        f"| In HubSpot, but created another time | {len(matched_outside)} |",
+        f"| **Missing from HubSpot entirely** | **{len(missing)}** |",
     ]
     if skipped:
-        lines.append(f"| ⚠️ Skipped (no email/phone in row) | {len(skipped)} |")
-    lines += ["", f"HubSpot contacts created in this range: {hs_total}.", ""]
-    if unmatched:
-        preview = unmatched[:15]
-        lines += ["### Missing leads (first 15 — full list in the downloaded file)", "",
-                  "| Name | Email | Phone | FB date |", "|---|---|---|---|"]
-        for ld in preview:
-            lines.append(f"| {ld['name'] or '-'} | {ld['email_raw'] or '-'} | "
-                         f"{ld['phone_raw'] or '-'} | {ld['date'].isoformat() if ld['date'] else '-'} |")
-        lines.append("")
-        lines.append(f"⬇️ Download **{OUT_FILE}** from the Artifacts section of this run for the complete list.")
+        lines.append(f"| Skipped (no email/phone in row) | {len(skipped)} |")
+    lines += ["", f"For reference, HubSpot has {hs_total} contacts created in this range.", ""]
+
+    def table(title, rows_):
+        out = [f"### {title} (first 15 — full list in the downloaded file)", "",
+               "| Name | Email | Phone | FB date |", "|---|---|---|---|"]
+        for ld in rows_[:15]:
+            out.append(f"| {ld['name'] or '-'} | {ld['email_raw'] or '-'} | "
+                       f"{ld['phone_raw'] or '-'} | {ld['date'].isoformat() if ld['date'] else '-'} |")
+        out.append("")
+        return out
+
+    if missing:
+        lines += table("Missing from HubSpot", missing)
     else:
-        lines.append("🎉 Every Facebook lead in this range was found in HubSpot.")
+        lines += ["✅ Every Facebook lead in this range was found in HubSpot — nothing is truly missing.", ""]
+    if matched_outside:
+        lines += table("In HubSpot, but created outside this range", matched_outside)
+        lines += ["These already exist in HubSpot from another time (returning people or older records). "
+                  "Review them if you expected a brand-new contact this period.", ""]
+    lines.append(f"⬇️ Download **{OUT_FILE}** from the Artifacts section for the full lists.")
     summary("\n".join(lines))
 
 if __name__ == "__main__":
