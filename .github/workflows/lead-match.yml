@@ -1,0 +1,49 @@
+name: Facebook to HubSpot lead match
+
+# Run it manually from the Actions tab, choosing the date range each time.
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Start date YYYY-MM-DD (leave blank = 1st of this month)"
+        required: false
+        default: ""
+      end_date:
+        description: "End date YYYY-MM-DD (leave blank = today)"
+        required: false
+        default: ""
+      leads_file:
+        description: "Excel filename in the repo"
+        required: false
+        default: "facebook-leads.xlsx"
+
+jobs:
+  match:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests openpyxl
+
+      - name: Run reconciliation
+        env:
+          HUBSPOT_TOKEN: ${{ secrets.HUBSPOT_TOKEN }}
+          START_DATE: ${{ github.event.inputs.start_date }}
+          END_DATE: ${{ github.event.inputs.end_date }}
+          LEADS_FILE: ${{ github.event.inputs.leads_file }}
+        run: python match_leads.py
+
+      - name: Upload the unmatched list
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unmatched-leads
+          path: unmatched-leads.xlsx
+          if-no-files-found: ignore
