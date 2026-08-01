@@ -19,7 +19,9 @@ Optional column overrides (only if auto-detection picks the wrong column):
 
 import os
 import re
+import csv
 import sys
+import glob
 import datetime
 import requests
 from openpyxl import load_workbook, Workbook
@@ -108,23 +110,55 @@ def find_col(headers, override, keywords):
         for i, h in enumerate(headers):
             if (h or "").strip().lower() == override.strip().lower():
                 return i
-        die(f'Column "{override}" was not found in the Excel. Headers are: {headers}')
+        die(f'Column "{override}" was not found in the file. Headers are: {headers}')
     for kw in keywords:  # keywords are tried in priority order
         for i, h in enumerate(lowered):
             if kw in h:
                 return i
     return None
 
+def resolve_leads_file():
+    """Use LEADS_FILE if it exists; otherwise find a Facebook export in the repo."""
+    if LEADS_FILE and os.path.exists(LEADS_FILE):
+        return LEADS_FILE
+    for cand in ["facebook-leads.csv", "facebook-leads.xlsx",
+                 "facebook_leads.csv", "facebook_leads.xlsx", "leads.csv", "leads.xlsx"]:
+        if os.path.exists(cand):
+            return cand
+    found = sorted(glob.glob("*.csv") + glob.glob("*.xlsx"))
+    found = [f for f in found if os.path.basename(f) != OUT_FILE]
+    if len(found) == 1:
+        return found[0]
+    die(f'Could not find your leads file. Upload it to the repo root as "facebook-leads.csv" '
+        f'or "facebook-leads.xlsx". Files seen: {found or "none"}.')
+
+def load_table(path):
+    """Return (headers, rows) for a .csv or .xlsx file. Cells are strings/numbers/dates."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".csv":
+        with open(path, newline="", encoding="utf-8-sig", errors="replace") as f:
+            all_rows = list(csv.reader(f))
+        if not all_rows:
+            die("The CSV file appears to be empty.")
+        return [str(h).strip() for h in all_rows[0]], all_rows[1:]
+    elif ext in (".xlsx", ".xlsm"):
+        wb = load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        it = ws.iter_rows(values_only=True)
+        try:
+            headers = [str(h).strip() if h is not None else "" for h in next(it)]
+        except StopIteration:
+            die("The Excel file appears to be empty.")
+        rows = [list(r) for r in it]
+        wb.close()
+        return headers, rows
+    else:
+        die(f'Unsupported file type "{ext}". Please upload a .csv or .xlsx file.')
+
 def read_leads():
-    if not os.path.exists(LEADS_FILE):
-        die(f'Could not find "{LEADS_FILE}" in the repository. Upload your Facebook leads Excel with that name.')
-    wb = load_workbook(LEADS_FILE, read_only=True, data_only=True)
-    ws = wb.active
-    rows = ws.iter_rows(values_only=True)
-    try:
-        headers = [str(h).strip() if h is not None else "" for h in next(rows)]
-    except StopIteration:
-        die("The Excel file appears to be empty.")
+    path = resolve_leads_file()
+    log(f"Reading leads from: {path}")
+    headers, data_rows = load_table(path)
 
     i_email = find_col(headers, OV_EMAIL, ["email", "e-mail", "mail"])
     i_phone = find_col(headers, OV_PHONE, ["phone", "mobile", "whatsapp", "contact number", "number"])
@@ -134,7 +168,7 @@ def read_leads():
     i_date  = find_col(headers, OV_DATE,  ["created_time", "created time", "created", "submitted", "date", "time"])
 
     if i_email is None and i_phone is None:
-        die(f"Could not find an email or phone column in the Excel. Headers are: {headers}. "
+        die(f"Could not find an email or phone column. Headers are: {headers}. "
             f"Set COL_EMAIL / COL_PHONE to the exact header text if needed.")
 
     log(f"Detected columns -> email: {headers[i_email] if i_email is not None else '(none)'} | "
@@ -143,7 +177,7 @@ def read_leads():
         f"date: {headers[i_date] if i_date is not None else '(none)'}")
 
     leads = []
-    for r in rows:
+    for r in data_rows:
         if r is None or all(c is None or str(c).strip() == "" for c in r):
             continue
         def cell(idx):
@@ -163,7 +197,6 @@ def read_leads():
             "phone": phone,
             "date": d,
         })
-    wb.close()
     return leads, (i_date is not None)
 
 # ------------------------------------------------------------------ HubSpot
@@ -254,7 +287,7 @@ def main():
 
     log(f"Range: {start} to {end}")
     leads, has_date = read_leads()
-    log(f"Read {len(leads)} rows from {LEADS_FILE}.")
+    log(f"Read {len(leads)} rows.")
 
     # keep only leads whose Facebook date falls in the range (if a date column exists)
     if has_date:
