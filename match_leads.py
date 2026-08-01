@@ -23,6 +23,7 @@ import io
 import csv
 import sys
 import glob
+import time
 import datetime
 import requests
 from openpyxl import load_workbook, Workbook
@@ -41,6 +42,7 @@ OV_DATE  = os.environ.get("COL_DATE", "").strip()
 
 BASE = "https://api.hubapi.com"
 HDRS = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
+SEARCH_THROTTLE = 0.3   # seconds to wait after each HubSpot search (stay under the per-second limit)
 
 # HubSpot properties that may hold a phone number (add custom ones here if needed)
 HS_PHONE_PROPS = ["phone", "mobilephone"]
@@ -217,12 +219,32 @@ def read_leads():
 
 # ------------------------------------------------------------------ HubSpot
 def hs_search(body):
-    r = requests.post(f"{BASE}/crm/v3/objects/contacts/search", headers=HDRS, json=body, timeout=60)
-    if r.status_code == 401:
-        die("HubSpot rejected the token (401). Check the HUBSPOT_TOKEN secret and its scopes.")
-    if r.status_code >= 300:
-        die(f"HubSpot API error {r.status_code}: {r.text[:300]}")
-    return r.json()
+    url = f"{BASE}/crm/v3/objects/contacts/search"
+    for attempt in range(8):
+        r = requests.post(url, headers=HDRS, json=body, timeout=60)
+        if r.status_code == 429:
+            wait = 0
+            ra = r.headers.get("Retry-After")
+            if ra:
+                try:
+                    wait = float(ra)
+                except ValueError:
+                    wait = 0
+            if wait <= 0:
+                wait = 2 + attempt * 2
+            wait = min(wait, 15)
+            log(f"HubSpot rate limit hit; waiting {wait:.0f}s then retrying (attempt {attempt + 1}/8)...")
+            time.sleep(wait)
+            continue
+        if r.status_code == 401:
+            die("HubSpot rejected the token (401). Check the HUBSPOT_TOKEN secret and its scopes.")
+        if r.status_code >= 300:
+            die(f"HubSpot API error {r.status_code}: {r.text[:300]}")
+        time.sleep(SEARCH_THROTTLE)
+        return r.json()
+    die("HubSpot kept rate-limiting the requests. This usually means the token is busy with "
+        "your other scripts, or the workflow was run several times in quick succession. "
+        "Wait a minute and run it again.")
 
 def fetch_contacts_in_range(start_ms, end_ms):
     """All contacts created in the window -> normalised email set + phone set."""
