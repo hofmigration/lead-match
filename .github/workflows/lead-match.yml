@@ -13,9 +13,9 @@ on:
         required: false
         default: ""
       leads_file:
-        description: "Excel filename in the repo"
+        description: "Leads filename (blank = auto-find facebook-leads.csv or .xlsx)"
         required: false
-        default: "facebook-leads.xlsx"
+        default: ""
 
 jobs:
   match:
