@@ -27,6 +27,7 @@ import time
 import datetime
 import requests
 from openpyxl import load_workbook, Workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
 # ------------------------------------------------------------------ config
 TOKEN      = os.environ.get("HUBSPOT_TOKEN", "").strip()
@@ -214,8 +215,9 @@ def read_leads():
             "email": email,
             "phone": phone,
             "date": d,
+            "raw": [(r[j] if j < len(r) else "") for j in range(len(headers))],
         })
-    return leads, (i_date is not None)
+    return leads, (i_date is not None), headers
 
 # ------------------------------------------------------------------ HubSpot
 def hs_search(body):
@@ -324,7 +326,7 @@ def main():
         die("Start date is after end date.")
 
     log(f"Range: {start} to {end}")
-    leads, has_date = read_leads()
+    leads, has_date, src_headers = read_leads()
     log(f"Read {len(leads)} rows.")
 
     # keep only leads whose Facebook date falls in the range (if a date column exists)
@@ -371,15 +373,17 @@ def main():
 
     checked = len(matched_in) + len(matched_outside) + len(missing)
 
-    # ---- write the results workbook (one sheet per bucket) ----
+    # ---- write the results workbook (one sheet per bucket, full original columns) ----
+    def clean(v):
+        return ILLEGAL_CHARACTERS_RE.sub("", v) if isinstance(v, str) else v
+
     def add_sheet(wb, title, rows_, first=False):
         ws = wb.active if first else wb.create_sheet(title)
         if first:
             ws.title = title
-        ws.append(["Name", "Email", "Phone", "Facebook date"])
+        ws.append([clean(h) for h in src_headers])      # all columns from the original file
         for ld in rows_:
-            ws.append([ld["name"], ld["email_raw"], ld["phone_raw"],
-                       ld["date"].isoformat() if ld["date"] else ""])
+            ws.append([clean(v) for v in ld["raw"]])
 
     wb = Workbook()
     add_sheet(wb, "Missing from HubSpot", missing, first=True)
